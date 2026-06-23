@@ -57,16 +57,27 @@ def wake_up_ldplayer(instance_name):
         logger.error(f"[WAKE] Lỗi trick cho {instance_name}: {e}")
         return False
 
-def run_key_press(instance_name, key):
-    """Gửi phím với retry và wake_up khi lỗi focus"""
+def send_key_to_ldplayer(instance_name, key, use_wake_up=False, max_retries=3):
+    """
+    Hàm unified gửi phím đến LDPlayer với hỗ trợ wake-up.
+    
+    Args:
+        instance_name: Tên giả lập
+        key: Phím cần gửi (ví dụ: 'a', 'ctrl+8', 'alt+ctrl+9')
+        use_wake_up: Có dùng Ctrl+8 wake-up trước không (mặc định False)
+        max_retries: Số lần retry tối đa (mặc định 3)
+    
+    Returns:
+        True nếu thành công, False nếu thất bại
+    """
     with key_lock:
         old_x, old_y = pyautogui.position()
         
-        max_retries = 3
         for attempt in range(max_retries):
             try:
                 logger.debug(f"[KEY] Thử gửi phím '{key}' cho {instance_name} (lần {attempt+1}/{max_retries})")
 
+                # Lấy hwnd
                 hwnd = get_ldplayer_hwnd(instance_name)
                 if not hwnd:
                     logger.warning(f"[KEY] Không tìm thấy hwnd cho {instance_name}")
@@ -81,9 +92,9 @@ def run_key_press(instance_name, key):
                     win32gui.SetForegroundWindow(hwnd)
                     time.sleep(0.25)
 
-                # Nếu là lần thử sau lần 1 → thực hiện wake_up
-                if attempt > 0:
-                    logger.info(f"[KEY] Thử wake_up_ldplayer lần {attempt}")
+                # Nếu yêu cầu wake-up và không phải lần 1 → thực hiện wake_up
+                if use_wake_up and attempt > 0:
+                    logger.info(f"[KEY] Thực hiện wake-up cho {instance_name} (lần {attempt})")
                     wake_up_ldplayer(instance_name)
                     time.sleep(0.6)
 
@@ -109,7 +120,7 @@ def run_key_press(instance_name, key):
                 logger.warning(f"[KEY] Lỗi lần {attempt+1} khi gửi '{key}' cho {instance_name}: {e}")
                 
                 if attempt < max_retries - 1:
-                    time.sleep(0.7)   # chờ một chút trước khi thử lại
+                    time.sleep(0.7)
                     continue
                 else:
                     logger.error(f"[KEY] Không gửi được phím '{key}' cho {instance_name} sau {max_retries} lần thử")
@@ -122,6 +133,13 @@ def run_key_press(instance_name, key):
             pass
         return False
 
+def run_key_press(instance_name, key):
+    """
+    Gửi phím đơn giản (không wake-up).
+    Wrapper để giữ compatibility với code cũ.
+    """
+    return send_key_to_ldplayer(instance_name, key, use_wake_up=False)
+
 def execute_single_job(job):
     try:
         logger.info(f"[EXEC] Bắt đầu thực thi job: {job}")
@@ -131,7 +149,7 @@ def execute_single_job(job):
         if job.job_type == "record":
             success = safe_execute(run_record_line, job.instance, int(job.value))
         elif job.job_type == "key":
-            success = safe_execute(run_key_press, job.instance, job.value)
+            success = safe_execute(send_key_to_ldplayer, job.instance, job.value, use_wake_up=False)
         elif job.job_type == "launch":
             success = safe_execute(launch_instance, job.instance)
         elif job.job_type == "quit":
@@ -185,8 +203,8 @@ def run_group_actions(instance, actions, visited=None, group_name="", parent_ins
                 elif action_type == "record":
                     safe_execute(run_record_line, instance, int(value))
                 elif action_type == "key":
-                    wake_up_ldplayer(instance)
-                    safe_execute(run_key_press, instance, value)
+                    # ← Dùng hàm unified với wake-up (vì nó trong nhóm action)
+                    safe_execute(send_key_to_ldplayer, instance, value, use_wake_up=True)
                 elif action_type == "launch":
                     safe_execute(launch_instance, instance)
                 elif action_type == "quit":
