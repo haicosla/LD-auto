@@ -43,35 +43,76 @@ def get_ldplayer_hwnd(instance_name):
         logger.error(f"Lỗi lấy hwnd {instance_name}: {e}")
         return None
 
-def wake_up_ldplayer(instance_name):
-    """Trick Ctrl+8 mở-đóng Recorder để đánh thức giả lập"""
+def prepare_ldplayer_for_key(instance_name):
+    """
+    Chuẩn bị giả lập để nhận phím:
+    1. Focus instance
+    2. Gửi Ctrl+8 (mở Operation Recorder)
+    3. Đóng Recorder
+    4. Focus lại instance
+    
+    Điều này đảm bảo instance luôn sẵn sàng, đặc biệt khi chạy nhiều instances cùng lúc
+    """
     try:
-        logger.debug(f"[WAKE] Bắt đầu trick Ctrl+8 cho {instance_name}")
+        logger.debug(f"[PREP] Chuẩn bị instance '{instance_name}' để nhận phím")
+        
+        # Bước 1: Focus instance
+        hwnd = get_ldplayer_hwnd(instance_name)
+        if not hwnd:
+            logger.warning(f"[PREP] Không tìm thấy hwnd cho {instance_name}")
+            return False
+        
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        win32gui.SetForegroundWindow(hwnd)
+        time.sleep(0.3)
+        logger.debug(f"[PREP] Đã focus instance {instance_name}")
+        
+        # Bước 2: Gửi Ctrl+8 (mở Operation Recorder)
+        logger.debug(f"[PREP] Gửi Ctrl+8 cho {instance_name}")
         pyautogui.hotkey('ctrl', '8')
-        time.sleep(0.6)
-
-        if not safe_execute(move_operation_recorder_window):
-            logger.warning(f"Không di chuyển được Operation Recorder cho {instance_name}")
-
-        time.sleep(0.5)
+        time.sleep(0.8)
+        
+        # Bước 3: Di chuyển Recorder window
+        try:
+            safe_execute(move_operation_recorder_window)
+        except:
+            pass
+        
+        time.sleep(0.3)
+        
+        # Bước 4: Đóng Recorder
+        logger.debug(f"[PREP] Đóng Operation Recorder")
         safe_execute(close_operation_recorder)
         time.sleep(0.5)
-
-        logger.info(f"[WAKE] Hoàn thành trick Ctrl+8 cho {instance_name}")
+        
+        # Bước 5: Focus lại instance
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        win32gui.SetForegroundWindow(hwnd)
+        time.sleep(0.3)
+        
+        logger.info(f"[PREP] Instance '{instance_name}' đã chuẩn bị sẵn sàng nhận phím")
         return True
+        
     except Exception as e:
-        logger.error(f"[WAKE] Lỗi trick cho {instance_name}: {e}")
+        logger.error(f"[PREP] Lỗi chuẩn bị instance {instance_name}: {e}")
         return False
 
-def send_key_to_ldplayer(instance_name, key, use_wake_up=False, max_retries=3):
+def send_key_to_ldplayer(instance_name, key, max_retries=3):
     """
-    Hàm unified gửi phím đến LDPlayer với hỗ trợ wake-up.
+    Hàm unified gửi phím đến LDPlayer.
+    
+    **MỚI: Luôn làm Ctrl+8 chuẩn bị trước khi gửi phím**
     
     Args:
         instance_name: Tên giả lập
         key: Phím cần gửi (ví dụ: 'a', 'ctrl+8', 'alt+ctrl+9')
-        use_wake_up: Có dùng Ctrl+8 wake-up trước không (mặc định False)
         max_retries: Số lần retry tối đa (mặc định 3)
+    
+    Flow:
+    1. Chuẩn bị instance (Ctrl+8 → Close → Focus)
+    2. Focus instance
+    3. Gửi phím
+    4. Restore chuột
     
     Returns:
         True nếu thành công, False nếu thất bại
@@ -79,73 +120,78 @@ def send_key_to_ldplayer(instance_name, key, use_wake_up=False, max_retries=3):
     with key_lock:
         old_x, old_y = pyautogui.position()
         
-        for attempt in range(max_retries):
-            try:
-                logger.debug(f"[KEY] Thử gửi phím '{key}' cho {instance_name} (lần {attempt+1}/{max_retries})")
+        try:
+            logger.info(f"[KEY] Bắt đầu gửi phím '{key}' cho {instance_name}")
+            
+            # === BƯỚC 1: CHUẨN BỊ INSTANCE (Ctrl+8) ===
+            if not prepare_ldplayer_for_key(instance_name):
+                logger.error(f"[KEY] Không thể chuẩn bị instance '{instance_name}'")
+                return False
+            
+            # === BƯỚC 2: GỬI PHÍM VỚI RETRY ===
+            for attempt in range(max_retries):
+                try:
+                    logger.debug(f"[KEY] Thử gửi phím '{key}' cho {instance_name} (lần {attempt+1}/{max_retries})")
 
-                # Lấy hwnd
-                hwnd = get_ldplayer_hwnd(instance_name)
-                if not hwnd:
-                    logger.warning(f"[KEY] Không tìm thấy hwnd cho {instance_name}")
-                    if attempt < max_retries - 1:
-                        time.sleep(0.5)
-                        continue
-                    return False
+                    # Focus lại trước mỗi lần gửi
+                    hwnd = get_ldplayer_hwnd(instance_name)
+                    if not hwnd:
+                        logger.warning(f"[KEY] Không tìm thấy hwnd cho {instance_name} (lần {attempt+1})")
+                        if attempt < max_retries - 1:
+                            time.sleep(0.5)
+                            continue
+                        return False
 
-                # Focus cửa sổ
-                for _ in range(2):
+                    # Focus cửa sổ
                     win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
                     win32gui.SetForegroundWindow(hwnd)
-                    time.sleep(0.25)
+                    time.sleep(0.3)
 
-                # Nếu yêu cầu wake-up và không phải lần 1 → thực hiện wake_up
-                if use_wake_up and attempt > 0:
-                    logger.info(f"[KEY] Thực hiện wake-up cho {instance_name} (lần {attempt})")
-                    wake_up_ldplayer(instance_name)
-                    time.sleep(0.6)
+                    # Gửi phím
+                    if '+' in key:
+                        keys = [k.strip() for k in key.split('+')]
+                        logger.debug(f"[KEY] Gửi hotkey: {'+'.join(keys)}")
+                        pyautogui.hotkey(*keys)
+                    else:
+                        logger.debug(f"[KEY] Gửi phím: {key}")
+                        pyautogui.press(key)
 
-                # Focus lại sau wake_up
-                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-                win32gui.SetForegroundWindow(hwnd)
-                time.sleep(0.4)
+                    time.sleep(0.2)  # Đợi phím được xử lý
 
-                # Gửi phím
-                if '+' in key:
-                    keys = [k.strip() for k in key.split('+')]
-                    pyautogui.hotkey(*keys)
-                else:
-                    pyautogui.press(key)
+                    # Restore chuột ngay lập tức
+                    pyautogui.moveTo(old_x, old_y, duration=0)
 
-                # Restore chuột ngay lập tức
+                    logger.info(f"[KEY] ✅ Đã gửi phím '{key}' cho {instance_name} thành công (lần {attempt+1})")
+                    return True
+
+                except Exception as e:
+                    logger.warning(f"[KEY] Lỗi lần {attempt+1} khi gửi '{key}' cho {instance_name}: {e}")
+                    
+                    if attempt < max_retries - 1:
+                        logger.debug(f"[KEY] Retry lần {attempt+2}...")
+                        time.sleep(0.5)
+                        continue
+                    else:
+                        logger.error(f"[KEY] ❌ Không gửi được phím '{key}' cho {instance_name} sau {max_retries} lần thử")
+                        return False
+
+            return False
+            
+        except Exception as e:
+            logger.error(f"[KEY] Lỗi nghiêm trọng khi gửi phím '{key}' cho {instance_name}: {e}")
+            return False
+        finally:
+            try:
                 pyautogui.moveTo(old_x, old_y, duration=0)
-                time.sleep(0.2)  # ← Thêm delay nhỏ để đảm bảo phím được xử lý
-
-                logger.info(f"[KEY] Đã gửi phím '{key}' cho {instance_name} thành công")
-                return True
-
-            except Exception as e:
-                logger.warning(f"[KEY] Lỗi lần {attempt+1} khi gửi '{key}' cho {instance_name}: {e}")
-                
-                if attempt < max_retries - 1:
-                    time.sleep(0.7)
-                    continue
-                else:
-                    logger.error(f"[KEY] Không gửi được phím '{key}' cho {instance_name} sau {max_retries} lần thử")
-                    return False
-
-        # Nếu thoát vòng lặp mà không return
-        try:
-            pyautogui.moveTo(old_x, old_y, duration=0)
-        except:
-            pass
-        return False
+            except:
+                pass
 
 def run_key_press(instance_name, key):
     """
-    Gửi phím đơn giản (không wake-up).
+    Gửi phím đơn giản.
     Wrapper để giữ compatibility với code cũ.
     """
-    return send_key_to_ldplayer(instance_name, key, use_wake_up=False)
+    return send_key_to_ldplayer(instance_name, key)
 
 def execute_single_job(job):
     """Thực thi một job đơn lẻ (không phải nhóm)"""
@@ -156,39 +202,39 @@ def execute_single_job(job):
         if job.job_type == "record":
             success = safe_execute(run_record_line, job.instance, int(job.value))
             if success:
-                logger.info(f"[EXEC] Job record thành công: dòng {job.value}")
+                logger.info(f"[EXEC] ✅ Job record thành công: dòng {job.value}")
             else:
-                logger.error(f"[EXEC] Job record thất bại: dòng {job.value}")
+                logger.error(f"[EXEC] ❌ Job record thất bại: dòng {job.value}")
                 
         elif job.job_type == "key":
-            success = safe_execute(send_key_to_ldplayer, job.instance, job.value, False)
+            success = safe_execute(send_key_to_ldplayer, job.instance, job.value)
             if success:
-                logger.info(f"[EXEC] Job key thành công: {job.value}")
+                logger.info(f"[EXEC] ✅ Job key thành công: {job.value}")
             else:
-                logger.error(f"[EXEC] Job key thất bại: {job.value}")
+                logger.error(f"[EXEC] ❌ Job key thất bại: {job.value}")
                 
         elif job.job_type == "launch":
             success = safe_execute(launch_instance, job.instance)
             if success:
-                logger.info(f"[EXEC] Job launch thành công")
-                time.sleep(0.5)  # Đảm bảo giả lập có thời gian khởi động
+                logger.info(f"[EXEC] ✅ Job launch thành công")
+                time.sleep(0.5)
             else:
-                logger.error(f"[EXEC] Job launch thất bại")
+                logger.error(f"[EXEC] ❌ Job launch thất bại")
                 
         elif job.job_type == "quit":
             success = safe_execute(quit_instance, job.instance)
             if success:
-                logger.info(f"[EXEC] Job quit thành công")
+                logger.info(f"[EXEC] ✅ Job quit thành công")
             else:
-                logger.error(f"[EXEC] Job quit thất bại")
+                logger.error(f"[EXEC] ❌ Job quit thất bại")
                 
         elif job.job_type == "notification":
             auto_close_messagebox("info", "Thông báo", f"Đã đến giờ {job.time_str[:-3]}")
             success = True
-            logger.info(f"[EXEC] Notification thành công")
+            logger.info(f"[EXEC] ✅ Notification thành công")
             
         else:
-            logger.warning(f"Loại job không hỗ trợ: {job.job_type}")
+            logger.warning(f"[EXEC] ⚠️ Loại job không hỗ trợ: {job.job_type}")
             success = False
 
         job.status = "Đã chạy" if success else "Lỗi"
@@ -203,6 +249,8 @@ def execute_single_job(job):
 def run_group_actions(instance, actions, visited=None, group_name="", parent_instance=""):
     """
     Chạy một nhóm hành động tuần tự.
+    
+    **MỚI: Trước khi gửi PHÍM BẤT CỨ LÚC NÀO đều làm Ctrl+8 chuẩn bị trước**
     
     Args:
         instance: Tên giả lập
@@ -242,63 +290,62 @@ def run_group_actions(instance, actions, visited=None, group_name="", parent_ins
                     sub_group = next((g for g in ACTION_GROUPS if g["name"] == sub_name), None)
                     if sub_group:
                         logger.info(f"[GROUP] Chạy nhóm con: {sub_name}")
-                        run_group_actions(instance, sub_group["actions"], visited, sub_name, instance)
-                        action_success = True
+                        action_success = run_group_actions(instance, sub_group["actions"], visited, sub_name, instance)
                     else:
-                        logger.warning(f"[GROUP] Nhóm con '{sub_name}' không tồn tại")
+                        logger.warning(f"[GROUP] ❌ Nhóm con '{sub_name}' không tồn tại")
                     visited.remove(sub_name)
 
                 elif action_type == "record":
                     # Chạy dòng script
                     action_success = safe_execute(run_record_line, instance, int(value))
                     if action_success:
-                        logger.info(f"[GROUP] Record dòng {value} thành công")
+                        logger.info(f"[GROUP] ✅ Record dòng {value} thành công")
                     else:
-                        logger.error(f"[GROUP] Record dòng {value} thất bại")
+                        logger.error(f"[GROUP] ❌ Record dòng {value} thất bại")
                         
                 elif action_type == "key":
-                    # Gửi phím với wake-up
-                    action_success = safe_execute(send_key_to_ldplayer, instance, value, use_wake_up=True)
+                    # **MỚI: GỬI PHÍM LUÔN CÓ Ctrl+8 CHUẨN BỊ TRƯỚC**
+                    action_success = safe_execute(send_key_to_ldplayer, instance, value)
                     if action_success:
-                        logger.info(f"[GROUP] Gửi phím '{value}' thành công")
+                        logger.info(f"[GROUP] ✅ Gửi phím '{value}' thành công (có Ctrl+8 chuẩn bị)")
                     else:
-                        logger.error(f"[GROUP] Gửi phím '{value}' thất bại")
+                        logger.error(f"[GROUP] ❌ Gửi phím '{value}' thất bại")
                         
                 elif action_type == "launch":
                     action_success = safe_execute(launch_instance, instance)
                     if action_success:
-                        logger.info(f"[GROUP] Launch thành công")
+                        logger.info(f"[GROUP] ✅ Launch thành công")
                         time.sleep(0.5)
                     else:
-                        logger.error(f"[GROUP] Launch thất bại")
+                        logger.error(f"[GROUP] ❌ Launch thất bại")
                         
                 elif action_type == "quit":
                     action_success = safe_execute(quit_instance, instance)
                     if action_success:
-                        logger.info(f"[GROUP] Quit thành công")
+                        logger.info(f"[GROUP] ✅ Quit thành công")
                     else:
-                        logger.error(f"[GROUP] Quit thất bại")
+                        logger.error(f"[GROUP] ❌ Quit thất bại")
                         
                 else:
-                    logger.warning(f"[GROUP] Loại hành động không hỗ trợ: {action_type}")
+                    logger.warning(f"[GROUP] ⚠️ Loại hành động không hỗ trợ: {action_type}")
 
                 if action_success:
                     action_success_count += 1
 
             except Exception as e:
-                logger.error(f"[GROUP] Lỗi hành động {idx} trong nhóm {group_name}: {e}\n{traceback.format_exc()}")
+                logger.error(f"[GROUP] ❌ Lỗi hành động {idx} trong nhóm {group_name}: {e}\n{traceback.format_exc()}")
 
             # Chờ delay giữa các hành động
             if delay > 0:
-                logger.debug(f"[GROUP] Chờ {delay} giây trước hành động tiếp theo...")
+                logger.debug(f"[GROUP] ⏳ Chờ {delay} giây trước hành động tiếp theo...")
                 remaining = delay
                 while remaining > 0:
                     time.sleep(min(remaining, 1.0))
                     remaining -= 1.0
 
-        logger.info(f"[GROUP] Hoàn thành nhóm '{group_name}' trên {instance} ({action_success_count}/{len(actions)} hành động thành công)")
+        logger.info(f"[GROUP] ✅ Hoàn thành nhóm '{group_name}' trên {instance} ({action_success_count}/{len(actions)} hành động thành công)")
         return action_success_count == len(actions)
         
     except Exception as e:
-        logger.error(f"[GROUP] Lỗi toàn bộ run_group_actions cho nhóm {group_name}: {e}\n{traceback.format_exc()}")
+        logger.error(f"[GROUP] ❌ Lỗi toàn bộ run_group_actions cho nhóm {group_name}: {e}\n{traceback.format_exc()}")
         return False
