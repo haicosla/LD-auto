@@ -10,7 +10,7 @@ from ldconsole import launch_instance, quit_instance
 from recorder import run_record_line
 from action_groups import ACTION_GROUPS
 from utils import auto_close_messagebox, focus_emulator, move_operation_recorder_window, close_operation_recorder
-from utils import run_default_group_if_exists   # ← Sửa thành import từ utils
+from utils import run_default_group_if_exists
 from logger import get_logger
 
 logger = get_logger()
@@ -19,14 +19,20 @@ logger = get_logger()
 key_lock = threading.Lock()
 
 def safe_execute(func, *args, **kwargs):
-    """Wrapper an toàn cho mọi hành động"""
+    """Wrapper an toàn cho mọi hành động - trả về True/False rõ ràng"""
     try:
-        return func(*args, **kwargs)
+        result = func(*args, **kwargs)
+        # Nếu function trả về True/False, dùng giá trị đó
+        if isinstance(result, bool):
+            return result
+        # Nếu không throw exception, coi là thành công
+        return True
     except Exception as e:
         logger.error(f"Lỗi trong {func.__name__}: {e}\n{traceback.format_exc()}")
         return False
 
 def get_ldplayer_hwnd(instance_name):
+    """Lấy window handle của LDPlayer instance"""
     try:
         hwnd = win32gui.FindWindow(None, instance_name)
         if hwnd == 0:
@@ -112,6 +118,7 @@ def send_key_to_ldplayer(instance_name, key, use_wake_up=False, max_retries=3):
 
                 # Restore chuột ngay lập tức
                 pyautogui.moveTo(old_x, old_y, duration=0)
+                time.sleep(0.2)  # ← Thêm delay nhỏ để đảm bảo phím được xử lý
 
                 logger.info(f"[KEY] Đã gửi phím '{key}' cho {instance_name} thành công")
                 return True
@@ -141,22 +148,45 @@ def run_key_press(instance_name, key):
     return send_key_to_ldplayer(instance_name, key, use_wake_up=False)
 
 def execute_single_job(job):
+    """Thực thi một job đơn lẻ (không phải nhóm)"""
     try:
         logger.info(f"[EXEC] Bắt đầu thực thi job: {job}")
-
-        # === KHÔNG chạy nhóm mặc định ở đây nữa (đã chạy ở mức group) ===
+        success = False
 
         if job.job_type == "record":
             success = safe_execute(run_record_line, job.instance, int(job.value))
+            if success:
+                logger.info(f"[EXEC] Job record thành công: dòng {job.value}")
+            else:
+                logger.error(f"[EXEC] Job record thất bại: dòng {job.value}")
+                
         elif job.job_type == "key":
-            success = safe_execute(send_key_to_ldplayer, job.instance, job.value, use_wake_up=False)
+            success = safe_execute(send_key_to_ldplayer, job.instance, job.value, False)
+            if success:
+                logger.info(f"[EXEC] Job key thành công: {job.value}")
+            else:
+                logger.error(f"[EXEC] Job key thất bại: {job.value}")
+                
         elif job.job_type == "launch":
             success = safe_execute(launch_instance, job.instance)
+            if success:
+                logger.info(f"[EXEC] Job launch thành công")
+                time.sleep(0.5)  # Đảm bảo giả lập có thời gian khởi động
+            else:
+                logger.error(f"[EXEC] Job launch thất bại")
+                
         elif job.job_type == "quit":
             success = safe_execute(quit_instance, job.instance)
+            if success:
+                logger.info(f"[EXEC] Job quit thành công")
+            else:
+                logger.error(f"[EXEC] Job quit thất bại")
+                
         elif job.job_type == "notification":
             auto_close_messagebox("info", "Thông báo", f"Đã đến giờ {job.time_str[:-3]}")
             success = True
+            logger.info(f"[EXEC] Notification thành công")
+            
         else:
             logger.warning(f"Loại job không hỗ trợ: {job.job_type}")
             success = False
@@ -171,54 +201,104 @@ def execute_single_job(job):
         return False
 
 def run_group_actions(instance, actions, visited=None, group_name="", parent_instance=""):
+    """
+    Chạy một nhóm hành động tuần tự.
+    
+    Args:
+        instance: Tên giả lập
+        actions: Danh sách hành động (từ action_groups.json)
+        visited: Set để tránh vòng lặp nhóm
+        group_name: Tên nhóm (cho logging)
+        parent_instance: Instance cha (để debug)
+    """
     if visited is None:
         visited = set()
 
     logger.info(f"[GROUP] Bắt đầu chạy nhóm '{group_name}' trên {instance} ({len(actions)} hành động)")
 
     try:
+        action_success_count = 0
+        
         for idx, action in enumerate(actions, 1):
             if not isinstance(action, dict):
-                logger.error(f"Hành động không phải dict: {action}")
+                logger.error(f"[GROUP] Hành động không phải dict: {action}")
                 continue
 
             action_type = action.get("type")
             value = action.get("value")
             delay = action.get("delay", 0)
 
-            logger.debug(f"[GROUP] Hành động {idx}: {action_type} - {value} (delay {delay}s)")
+            logger.debug(f"[GROUP] Hành động {idx}/{len(actions)}: {action_type} - {value} (delay {delay}s)")
 
+            action_success = False
             try:
                 if action_type == "group":
+                    # Xử lý nhóm con lồng nhau
                     sub_name = value
                     if sub_name in visited:
-                        logger.warning(f"Tránh vòng lặp nhóm: {sub_name}")
+                        logger.warning(f"[GROUP] Tránh vòng lặp nhóm: {sub_name}")
                         continue
                     visited.add(sub_name)
                     sub_group = next((g for g in ACTION_GROUPS if g["name"] == sub_name), None)
                     if sub_group:
+                        logger.info(f"[GROUP] Chạy nhóm con: {sub_name}")
                         run_group_actions(instance, sub_group["actions"], visited, sub_name, instance)
+                        action_success = True
+                    else:
+                        logger.warning(f"[GROUP] Nhóm con '{sub_name}' không tồn tại")
                     visited.remove(sub_name)
 
                 elif action_type == "record":
-                    safe_execute(run_record_line, instance, int(value))
+                    # Chạy dòng script
+                    action_success = safe_execute(run_record_line, instance, int(value))
+                    if action_success:
+                        logger.info(f"[GROUP] Record dòng {value} thành công")
+                    else:
+                        logger.error(f"[GROUP] Record dòng {value} thất bại")
+                        
                 elif action_type == "key":
-                    # ← Dùng hàm unified với wake-up (vì nó trong nhóm action)
-                    safe_execute(send_key_to_ldplayer, instance, value, use_wake_up=True)
+                    # Gửi phím với wake-up
+                    action_success = safe_execute(send_key_to_ldplayer, instance, value, use_wake_up=True)
+                    if action_success:
+                        logger.info(f"[GROUP] Gửi phím '{value}' thành công")
+                    else:
+                        logger.error(f"[GROUP] Gửi phím '{value}' thất bại")
+                        
                 elif action_type == "launch":
-                    safe_execute(launch_instance, instance)
+                    action_success = safe_execute(launch_instance, instance)
+                    if action_success:
+                        logger.info(f"[GROUP] Launch thành công")
+                        time.sleep(0.5)
+                    else:
+                        logger.error(f"[GROUP] Launch thất bại")
+                        
                 elif action_type == "quit":
-                    safe_execute(quit_instance, instance)
+                    action_success = safe_execute(quit_instance, instance)
+                    if action_success:
+                        logger.info(f"[GROUP] Quit thành công")
+                    else:
+                        logger.error(f"[GROUP] Quit thất bại")
+                        
                 else:
-                    logger.warning(f"Loại hành động không hỗ trợ: {action_type}")
+                    logger.warning(f"[GROUP] Loại hành động không hỗ trợ: {action_type}")
+
+                if action_success:
+                    action_success_count += 1
 
             except Exception as e:
-                logger.error(f"Lỗi hành động {idx} trong nhóm {group_name}: {e}")
+                logger.error(f"[GROUP] Lỗi hành động {idx} trong nhóm {group_name}: {e}\n{traceback.format_exc()}")
 
+            # Chờ delay giữa các hành động
             if delay > 0:
-                logger.debug(f"Chờ {delay} giây...")
-                time.sleep(delay)
+                logger.debug(f"[GROUP] Chờ {delay} giây trước hành động tiếp theo...")
+                remaining = delay
+                while remaining > 0:
+                    time.sleep(min(remaining, 1.0))
+                    remaining -= 1.0
 
-        logger.info(f"[GROUP] Hoàn thành nhóm '{group_name}' trên {instance}")
+        logger.info(f"[GROUP] Hoàn thành nhóm '{group_name}' trên {instance} ({action_success_count}/{len(actions)} hành động thành công)")
+        return action_success_count == len(actions)
+        
     except Exception as e:
-        logger.error(f"Lỗi toàn bộ run_group_actions cho nhóm {group_name}: {e}")
+        logger.error(f"[GROUP] Lỗi toàn bộ run_group_actions cho nhóm {group_name}: {e}\n{traceback.format_exc()}")
+        return False
