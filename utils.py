@@ -10,16 +10,20 @@ import win32api
 
 from datetime import datetime
 from config import OPR_WINDOW_X, OPR_WINDOW_Y
+from logger import get_logger
 
+logger = get_logger()
 
 def get_ldplayer_hwnd(instance_name):
+    """Lấy window handle của LDPlayer instance"""
     hwnd = win32gui.FindWindow(None, instance_name)
     if hwnd == 0:
-        print(f"[FOCUS] Không tìm thấy cửa sổ {instance_name}")
+        logger.warning(f"[FOCUS] Không tìm thấy cửa sổ {instance_name}")
         return None
     return hwnd
     
 def auto_close_messagebox(msg_type, title, message, auto_close_sec=2):
+    """Hiển thị messagebox tự động đóng sau thời gian"""
     def show_and_close():
         win = tk.Toplevel()
         win.title(title)
@@ -39,87 +43,124 @@ def auto_close_messagebox(msg_type, title, message, auto_close_sec=2):
     
     threading.Thread(target=show_and_close, daemon=True).start()
 
-# utils.py - thay thế toàn bộ hàm focus_emulator
-# utils.py - thay thế toàn bộ hàm focus_emulator
 def focus_emulator(name):
+    """Focus vào cửa sổ LDPlayer giả lập"""
     hwnds = []
     def callback(hwnd, _):
         if win32gui.IsWindowVisible(hwnd):
             title = win32gui.GetWindowText(hwnd).lower()
             if name.lower() in title:
                 hwnds.append(hwnd)
-    win32gui.EnumWindows(callback, None)
+    
+    try:
+        win32gui.EnumWindows(callback, None)
+    except Exception as e:
+        logger.error(f"[FOCUS] Lỗi enum windows: {e}")
+        return False
+    
     if not hwnds:
-        print(f"[LOG] Không tìm thấy cửa sổ giả lập: {name}")
+        logger.warning(f"[FOCUS] Không tìm thấy cửa sổ giả lập: {name}")
         return False
     
     hwnd = hwnds[0]
-    for _ in range(3):
+    for attempt in range(3):
         try:
             win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
             win32gui.SetForegroundWindow(hwnd)
-            print(f"[LOG] Đã focus giả lập: {name}")
+            time.sleep(0.2)
+            logger.info(f"[FOCUS] Đã focus giả lập: {name} (lần {attempt+1})")
             return True
         except Exception as e:
-            print(f"[LOG] Lỗi focus giả lập {name}: {e}")
-            time.sleep(1)
-    print(f"[LOG] Không thể focus giả lập sau 3 lần thử: {name}")
+            logger.warning(f"[FOCUS] Lỗi focus giả lập {name} lần {attempt+1}: {e}")
+            time.sleep(0.5)
+    
+    logger.error(f"[FOCUS] Không thể focus giả lập sau 3 lần thử: {name}")
     return False
     
 def move_operation_recorder_window():
-    hwnd = win32gui.FindWindow("LDOperationRecorderWindow", None)
-    if hwnd == 0:
+    """Di chuyển Operation Recorder window đến vị trí định sẵn"""
+    try:
+        hwnd = win32gui.FindWindow("LDOperationRecorderWindow", None)
+        if hwnd == 0:
+            logger.warning("[MOVE] Không tìm thấy Operation Recorder window")
+            return False
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        win32gui.SetWindowPos(hwnd, win32con.HWND_TOP, OPR_WINDOW_X, OPR_WINDOW_Y, 0, 0, win32con.SWP_NOSIZE)
+        logger.debug(f"[MOVE] Di chuyển Recorder window đến ({OPR_WINDOW_X}, {OPR_WINDOW_Y})")
+        return True
+    except Exception as e:
+        logger.error(f"[MOVE] Lỗi di chuyển Recorder window: {e}")
         return False
-    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-    win32gui.SetWindowPos(hwnd, win32con.HWND_TOP, OPR_WINDOW_X, OPR_WINDOW_Y, 0, 0, win32con.SWP_NOSIZE)
-    return True
 
 def close_operation_recorder():
-    hwnd = win32gui.FindWindow("LDOperationRecorderWindow", None)
-    if hwnd:
-        win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+    """Đóng Operation Recorder"""
+    try:
+        hwnd = win32gui.FindWindow("LDOperationRecorderWindow", None)
+        if hwnd:
+            win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+            logger.debug("[CLOSE] Gửi lệnh đóng Operation Recorder")
+            time.sleep(0.2)
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"[CLOSE] Lỗi đóng Recorder: {e}")
+        return False
 
 def validate_time_input(t_str):
+    """Validate input thời gian (HH:MM hoặc HHMM) và trả về HH:MM:SS"""
     t_str = t_str.strip()
     if t_str.isdigit() and len(t_str) == 4:
         t_str = f"{t_str[:2]}:{t_str[2:]}"
     if len(t_str) != 5 or ":" not in t_str:
+        logger.warning(f"[VALIDATE] Định dạng thời gian không hợp lệ: {t_str}")
         return None
     try:
         datetime.strptime(t_str, "%H:%M")
-        return t_str + ":00"
+        result = t_str + ":00"
+        logger.debug(f"[VALIDATE] Validate thời gian thành công: {t_str} -> {result}")
+        return result
     except ValueError:
+        logger.warning(f"[VALIDATE] Giá trị thời gian không hợp lệ: {t_str}")
         return None
 
 def validate_key_input(key_str):
+    """Validate phím input"""
     if not key_str:
         return False
     keys = key_str.lower().split('+')
     valid = set(pyautogui.KEYBOARD_KEYS)
-    return all(k.strip() in valid for k in keys)
+    is_valid = all(k.strip() in valid for k in keys)
+    if not is_valid:
+        logger.warning(f"[VALIDATE] Phím không hợp lệ: {key_str}")
+    return is_valid
     
 # ==================== NHÓM MẶC ĐỊNH ====================
 def run_default_group_if_exists(instance_name, default_group=None):
     """Chạy nhóm mặc định trước khi thực hiện job chính (nếu có)"""
     if not default_group:
+        logger.debug(f"[DEFAULT] Không có nhóm mặc định để chạy")
         return True
 
-    from action_groups import ACTION_GROUPS
-    from executor import run_group_actions
-    from logger import get_logger
-
-    logger = get_logger()
+    try:
+        from action_groups import ACTION_GROUPS
+        from executor import run_group_actions
+    except ImportError as e:
+        logger.error(f"[DEFAULT] Lỗi import: {e}")
+        return False
 
     group = next((g for g in ACTION_GROUPS if g["name"] == default_group), None)
     if not group:
-        logger.warning(f"Nhóm mặc định '{default_group}' không còn tồn tại")
+        logger.warning(f"[DEFAULT] Nhóm mặc định '{default_group}' không còn tồn tại")
         return True
 
     logger.info(f"[DEFAULT] Bắt đầu chạy nhóm mặc định '{default_group}' cho {instance_name}")
     try:
-        run_group_actions(instance_name, group["actions"], group_name=default_group)
-        logger.info(f"[DEFAULT] Hoàn thành nhóm mặc định cho {instance_name}")
+        success = run_group_actions(instance_name, group["actions"], group_name=default_group)
+        if success:
+            logger.info(f"[DEFAULT] Hoàn thành nhóm mặc định '{default_group}' thành công")
+        else:
+            logger.warning(f"[DEFAULT] Nhóm mặc định '{default_group}' gặp lỗi nhưng vẫn tiếp tục")
         return True
     except Exception as e:
-        logger.error(f"[DEFAULT] Lỗi chạy nhóm mặc định cho {instance_name}: {e}")
+        logger.error(f"[DEFAULT] Lỗi chạy nhóm mặc định '{default_group}' cho {instance_name}: {e}")
         return False
