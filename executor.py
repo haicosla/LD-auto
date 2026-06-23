@@ -45,52 +45,39 @@ def get_ldplayer_hwnd(instance_name):
 
 def prepare_ldplayer_for_key(instance_name):
     """
-    Chuẩn bị giả lập để nhận phím:
-    1. Focus instance
-    2. Gửi Ctrl+8 (mở Operation Recorder)
-    3. Đóng Recorder
-    4. Focus lại instance
-    
-    Điều này đảm bảo instance luôn sẵn sàng, đặc biệt khi chạy nhiều instances cùng lúc
+    Chuẩn bị giả lập để nhận phím - Phiên bản đơn giản
     """
     try:
         logger.debug(f"[PREP] Chuẩn bị instance '{instance_name}' để nhận phím")
         
-        # Bước 1: Focus instance
         hwnd = get_ldplayer_hwnd(instance_name)
         if not hwnd:
             logger.warning(f"[PREP] Không tìm thấy hwnd cho {instance_name}")
             return False
         
-        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-        win32gui.SetForegroundWindow(hwnd)
-        time.sleep(0.3)
-        logger.debug(f"[PREP] Đã focus instance {instance_name}")
+        # Focus + Bring to front
+        from utils import focus_emulator
+        focus_emulator(instance_name)
         
-        # Bước 2: Gửi Ctrl+8 (mở Operation Recorder)
+        # Gửi Ctrl+8
         logger.debug(f"[PREP] Gửi Ctrl+8 cho {instance_name}")
         pyautogui.hotkey('ctrl', '8')
         time.sleep(0.8)
         
-        # Bước 3: Di chuyển Recorder window
+        # Di chuyển + đóng Recorder
         try:
             safe_execute(move_operation_recorder_window)
         except:
             pass
-        
         time.sleep(0.3)
         
-        # Bước 4: Đóng Recorder
-        logger.debug(f"[PREP] Đóng Operation Recorder")
         safe_execute(close_operation_recorder)
         time.sleep(0.5)
         
-        # Bước 5: Focus lại instance
-        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-        win32gui.SetForegroundWindow(hwnd)
-        time.sleep(0.3)
+        # Focus lại lần cuối trước khi gửi phím thật
+        focus_emulator(instance_name)
         
-        logger.info(f"[PREP] Instance '{instance_name}' đã chuẩn bị sẵn sàng nhận phím")
+        logger.info(f"[PREP] ✅ Instance '{instance_name}' đã chuẩn bị sẵn sàng")
         return True
         
     except Exception as e:

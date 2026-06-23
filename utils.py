@@ -44,7 +44,7 @@ def auto_close_messagebox(msg_type, title, message, auto_close_sec=2):
     threading.Thread(target=show_and_close, daemon=True).start()
 
 def focus_emulator(name):
-    """Focus vào cửa sổ LDPlayer giả lập"""
+    """Focus + Bring to Front bình thường (không dùng TopMost)"""
     hwnds = []
     def callback(hwnd, _):
         if win32gui.IsWindowVisible(hwnd):
@@ -63,18 +63,28 @@ def focus_emulator(name):
         return False
     
     hwnd = hwnds[0]
+    
     for attempt in range(3):
         try:
-            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            # Bring to front + Wake up cửa sổ
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)      # Restore nếu bị minimize
+            time.sleep(0.1)
+            
+            win32gui.ShowWindow(hwnd, win32con.SW_SHOW)         # Wake up
+            time.sleep(0.1)
+            
+            # Đưa lên trên cùng (cách thông thường)
             win32gui.SetForegroundWindow(hwnd)
-            time.sleep(0.2)
-            logger.info(f"[FOCUS] Đã focus giả lập: {name} (lần {attempt+1})")
+            time.sleep(0.25)
+            
+            logger.info(f"[FOCUS] ✅ Đã bring to front giả lập: {name} (lần {attempt+1})")
             return True
+            
         except Exception as e:
-            logger.warning(f"[FOCUS] Lỗi focus giả lập {name} lần {attempt+1}: {e}")
-            time.sleep(0.5)
+            logger.warning(f"[FOCUS] Lỗi focus lần {attempt+1} cho {name}: {e}")
+            time.sleep(0.3)
     
-    logger.error(f"[FOCUS] Không thể focus giả lập sau 3 lần thử: {name}")
+    logger.error(f"[FOCUS] ❌ Không thể focus giả lập sau 3 lần thử: {name}")
     return False
     
 def move_operation_recorder_window():
