@@ -73,3 +73,36 @@ def save_action_groups():
 def update_group_jobs():
     # ... giữ nguyên logic cũ
     pass
+    
+# ====================== HÀNH ĐỘNG MẶC ĐỊNH (DEFAULT GROUP) ======================
+DEFAULT_GROUP_FILE = "default_group.json"
+
+def save_default_group():
+    """Lưu nhóm mặc định vào file"""
+    try:
+        data = {
+            "default_group_name": default_group_name
+        }
+        with open(DEFAULT_GROUP_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        print(f"[DEFAULT] Đã lưu hành động mặc định: {default_group_name}")
+    except Exception as e:
+        print(f"[DEFAULT] Lỗi lưu default group: {e}")
+
+def load_default_group():
+    """Load nhóm mặc định từ file"""
+    global default_group_name
+    try:
+        if os.path.exists(DEFAULT_GROUP_FILE):
+            with open(DEFAULT_GROUP_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                default_group_name = data.get("default_group_name")
+                print(f"[DEFAULT] Load mặc định thành công: {default_group_name}")
+                return default_group_name
+        else:
+            default_group_name = None
+            return None
+    except Exception as e:
+        print(f"[DEFAULT] Lỗi load default group: {e}")
+        default_group_name = None
+        return None
