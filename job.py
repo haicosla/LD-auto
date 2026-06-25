@@ -2,7 +2,6 @@
 from datetime import datetime, timedelta
 import json
 import os
-from uuid import uuid4
 from config import JOBS_FILE
 from utils import auto_close_messagebox
 
@@ -24,8 +23,6 @@ class Job:
         self.should_stop = False
         self.is_repeating = False  # THÊM
         self.repeat_interval = 0
-        # stable unique id for UI mapping and persistence
-        self.uid = str(uuid4())
         self.update_scheduled_time()
 
     def update_scheduled_time(self):
@@ -48,7 +45,6 @@ class Job:
 
     def to_dict(self):
         return {
-            'uid': getattr(self, 'uid', None),
             'time_str': self.time_str,
             'instance': self.instance,
             'job_type': self.job_type,
@@ -77,9 +73,6 @@ class Job:
         job.current_child_index = data.get('current_child_index', 0)
         job.is_repeating = data.get('is_repeating', False)      # Bắt buộc phải có
         job.repeat_interval = data.get('repeat_interval', 0)    # Bắt buộc phải có
-        # preserve uid if present (migration support)
-        if data.get('uid'):
-            job.uid = data.get('uid')
         job.update_scheduled_time()
         return job
 
