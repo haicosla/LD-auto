@@ -3,6 +3,8 @@
 
 import threading
 import traceback
+import queue
+import itertools
 import time as _time
 from datetime import datetime, timedelta
 
@@ -30,8 +32,65 @@ _aps = BackgroundScheduler(
 _aps.start()
 logger.info("[SCHED] APScheduler đã khởi động")
 
-# Theo dõi (instance, group_name) đang chạy để chặn chồng lượt lặp
+# Theo dõi (instance, group_name) đang xếp hàng/đang chạy để chặn chồng lượt lặp
 _running_group_keys: set = set()
+
+# ─────────────────────────────────────────────
+# HÀNG ĐỢI THỰC THI TOÀN CỤC (fix lỗi chồng chéo)
+# ─────────────────────────────────────────────
+# Vấn đề cũ: mỗi job đến giờ được chạy trong 1 thread riêng (qua
+# ThreadPoolExecutor của APScheduler), nên 2 nhóm khác nhau hẹn giờ gần
+# nhau (vd 11:00 và 11:01) sẽ CHẠY SONG SONG. Vì các thao tác thực tế
+# (di chuột, click, focus cửa sổ Operation Recorder...) dùng chung 1 con
+# trỏ chuột / 1 cửa sổ foreground của Windows, chạy song song sẽ giẫm
+# chân nhau → sai thao tác, lỗi.
+#
+# Cách sửa: mọi job (đơn lẫn nhóm) khi đến giờ KHÔNG chạy ngay trong
+# thread riêng nữa, mà chỉ được XẾP VÀO HÀNG ĐỢI (_exec_queue), sắp xếp
+# theo scheduled_time. MỘT worker thread duy nhất (_executor_worker) lấy
+# lần lượt từng job ra chạy — job nào tới giờ trước chạy trước và phải
+# chạy XONG HẲN mới đến job tiếp theo, dù nhóm nào có tới giờ chen giữa.
+_exec_queue = queue.PriorityQueue()
+_seq_counter = itertools.count()
+_current_job = None   # job đang thực sự chạy trong worker (None nếu đang rảnh)
+
+
+def get_queue_status():
+    """Trả về (job đang chạy hoặc None, số job còn đang xếp hàng chờ).
+    Dùng để hiển thị trạng thái 'Đang chạy - ... (còn N job chờ)' trên GUI."""
+    return _current_job, _exec_queue.qsize()
+
+
+def _enqueue(scheduled_time, job, kind, update_ui_callback, save_jobs_callback):
+    """Đưa 1 job vào hàng đợi thực thi, sắp theo scheduled_time (tới giờ trước chạy trước)."""
+    when = scheduled_time or datetime.now()
+    _exec_queue.put((when, next(_seq_counter), job, kind, update_ui_callback, save_jobs_callback))
+
+
+def _executor_worker():
+    """Worker DUY NHẤT chạy suốt vòng đời app — đảm bảo tại một thời điểm
+    chỉ có đúng 1 job (đơn hoặc nhóm) đang thao tác lên máy ảo."""
+    global _current_job
+    while True:
+        when, _, job, kind, update_ui_callback, save_jobs_callback = _exec_queue.get()
+        _current_job = job
+        try:
+            if kind == 'group':
+                _run_group_thread(job, update_ui_callback, save_jobs_callback)
+            else:
+                _run_single_job_body(job, update_ui_callback, save_jobs_callback)
+        except Exception as e:
+            logger.error(f"[SCHED] Lỗi trong worker thực thi hàng đợi: {e}\n{traceback.format_exc()}")
+        finally:
+            _current_job = None
+            _exec_queue.task_done()
+            if update_ui_callback:
+                update_ui_callback()
+
+
+_worker_thread = threading.Thread(target=_executor_worker, daemon=True, name="GlobalJobQueueWorker")
+_worker_thread.start()
+logger.info("[SCHED] Worker hàng đợi thực thi toàn cục đã khởi động")
 
 
 # ─────────────────────────────────────────────
@@ -92,14 +151,30 @@ def shutdown_scheduler():
 # ─────────────────────────────────────────────
 
 def _fire_single_job(job, update_ui_callback, save_jobs_callback):
-    logger.info(f"[SCHED] Fire single job: {job}")
+    """APScheduler gọi đúng giờ → chỉ XẾP HÀNG, không chạy ngay (tránh chồng
+    chéo với job khác đang/sắp chạy)."""
+    logger.info(f"[SCHED] Job đơn đến giờ, xếp vào hàng đợi: {job}")
+    job.status = "Đang chờ đến lượt"
+    running_threads[job] = True
+    _enqueue(job.scheduled_time, job, 'single', update_ui_callback, save_jobs_callback)
+    if update_ui_callback:
+        update_ui_callback()
+
+
+def _run_single_job_body(job, update_ui_callback, save_jobs_callback):
+    """Được worker gọi khi đến lượt job đơn này — thực thi thật sự."""
+    logger.info(f"[SCHED] Đến lượt, chạy job đơn: {job}")
+    job.status = "Đang chạy"
+    if update_ui_callback:
+        update_ui_callback()
     try:
         execute_single_job(job)
         job.status = "Đã chạy" if job.status != "Lỗi" else "Lỗi"
     except Exception as e:
-        logger.error(f"[SCHED] Lỗi fire single job: {e}\n{traceback.format_exc()}")
+        logger.error(f"[SCHED] Lỗi chạy job đơn: {e}\n{traceback.format_exc()}")
         job.status = "Lỗi"
     finally:
+        running_threads.pop(job, None)
         _after_job(job, update_ui_callback, save_jobs_callback)
 
 
@@ -108,14 +183,16 @@ def _fire_single_job(job, update_ui_callback, save_jobs_callback):
 # ─────────────────────────────────────────────
 
 def _fire_group_job(job, update_ui_callback, save_jobs_callback):
-    """Được APScheduler gọi đúng giờ → spawn thread chạy nhóm."""
-    logger.info(f"[SCHED] Fire group job: {job}")
+    """Được APScheduler gọi đúng giờ → chỉ XẾP HÀNG (không tự spawn thread
+    chạy song song nữa), để đảm bảo nhóm nào tới giờ trước chạy xong hẳn
+    rồi mới tới nhóm kế tiếp, dù 2 nhóm khác nhau hẹn giờ sát nhau."""
+    logger.info(f"[SCHED] Nhóm đến giờ, xếp vào hàng đợi: {job}")
 
     key = (job.instance, job.group_name)
     if key in _running_group_keys:
         logger.warning(
             f"[SCHED] Nhóm '{job.group_name}' trên '{job.instance}' "
-            f"đang chạy (lượt trước chưa xong) → bỏ qua, vẫn lên lịch lặp tiếp."
+            f"đang chạy/đang chờ (lượt trước chưa xong) → bỏ qua, vẫn lên lịch lặp tiếp."
         )
         job.status = "Bỏ qua - Trùng lượt"
         _after_job(job, update_ui_callback, save_jobs_callback)
@@ -124,18 +201,15 @@ def _fire_group_job(job, update_ui_callback, save_jobs_callback):
         return
 
     if job in running_threads:
-        logger.warning(f"[SCHED] Job nhóm đang chạy (running_threads), bỏ qua: {job}")
+        logger.warning(f"[SCHED] Job nhóm đã được xếp hàng/đang chạy, bỏ qua: {job}")
         return
 
-    job.status = "Đang chạy"
-    t = threading.Thread(
-        target=_run_group_thread,
-        args=(job, update_ui_callback, save_jobs_callback),
-        daemon=False,
-        name=f"GroupThread-{job.group_name}-{job.instance}",
-    )
-    running_threads[job] = t
-    t.start()
+    _running_group_keys.add(key)
+    job.status = "Đang chờ đến lượt"
+    running_threads[job] = True
+    _enqueue(job.scheduled_time, job, 'group', update_ui_callback, save_jobs_callback)
+    if update_ui_callback:
+        update_ui_callback()
 
 
 # ─────────────────────────────────────────────
@@ -145,8 +219,11 @@ def _fire_group_job(job, update_ui_callback, save_jobs_callback):
 def _run_group_thread(job, update_ui_callback, save_jobs_callback):
     key = (job.instance, job.group_name)
     _running_group_keys.add(key)
+    job.status = "Đang chạy"
+    if update_ui_callback:
+        update_ui_callback()
     try:
-        logger.info(f"[SCHED] Bắt đầu thread nhóm '{job.group_name}' trên {job.instance}")
+        logger.info(f"[SCHED] Đến lượt, bắt đầu chạy nhóm '{job.group_name}' trên {job.instance}")
 
         group = next((g for g in ACTION_GROUPS if g["name"] == job.group_name), None)
         if not group:
