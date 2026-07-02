@@ -30,7 +30,7 @@
             {
                 "type": "key",
                 "value": "f",
-                "delay": 15
+                "delay": 5
             }
         ]
     },
@@ -40,11 +40,6 @@
             {
                 "type": "launch",
                 "value": "1",
-                "delay": 150
-            },
-            {
-                "type": "key",
-                "value": "ctrl+1",
                 "delay": 80
             },
             {
@@ -70,7 +65,17 @@
             {
                 "type": "key",
                 "value": "alt+l",
-                "delay": 45
+                "delay": 50
+            }
+        ]
+    },
+    {
+        "name": "test",
+        "actions": [
+            {
+                "type": "key",
+                "value": "alt+x",
+                "delay": 3
             }
         ]
     },
@@ -80,76 +85,16 @@
             {
                 "type": "key",
                 "value": "alt+v",
-                "delay": 10
-            }
-        ]
-    },
-    {
-        "name": "Thương chiến",
-        "actions": [
-            {
-                "type": "key",
-                "value": "alt+t",
                 "delay": 5
             }
         ]
     },
     {
-        "name": "Thu ruộng 2",
+        "name": "test2",
         "actions": [
             {
                 "type": "key",
-                "value": "ctrl+alt+r",
-                "delay": 5
-            }
-        ]
-    },
-    {
-        "name": "Trộm ruộng",
-        "actions": [
-            {
-                "type": "key",
-                "value": "ctrl+r",
-                "delay": 5
-            }
-        ]
-    },
-    {
-        "name": "vn2",
-        "actions": [
-            {
-                "type": "launch",
-                "value": "5",
-                "delay": 130
-            },
-            {
-                "type": "key",
-                "value": "alt+c",
-                "delay": 30
-            },
-            {
-                "type": "key",
-                "value": "alt+v",
-                "delay": 60
-            },
-            {
-                "type": "quit",
-                "value": "1",
-                "delay": 1
-            }
-        ]
-    },
-    {
-        "name": "Reset",
-        "actions": [
-            {
-                "type": "quit",
-                "value": "1",
-                "delay": 5
-            },
-            {
-                "type": "launch",
-                "value": "1",
+                "value": "alt+]",
                 "delay": 5
             }
         ]

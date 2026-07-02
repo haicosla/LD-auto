@@ -1,9 +1,15 @@
+# scheduler.py - Dùng APScheduler thay polling loop
+# pip install apscheduler
+
 import threading
-import time
 import traceback
+import time as _time
 from datetime import datetime, timedelta
 
-from config import is_running, is_paused, running_threads
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.executors.pool import ThreadPoolExecutor
+
+from config import running_threads
 from job import Job, jobs, save_jobs
 from action_groups import ACTION_GROUPS
 from executor import execute_single_job, run_group_actions
@@ -11,210 +17,323 @@ from logger import get_logger
 
 logger = get_logger()
 
-def run_group_in_thread(group_job, update_ui_callback, save_jobs_callback):
-    """Chạy một job nhóm trong thread riêng biệt"""
-    thread_name = f"GroupThread-{group_job.group_name}-{group_job.instance}"
-    threading.current_thread().name = thread_name
+# ─────────────────────────────────────────────
+# Khởi tạo APScheduler (1 instance dùng chung)
+# ─────────────────────────────────────────────
+_aps = BackgroundScheduler(
+    executors={'default': ThreadPoolExecutor(20)},
+    job_defaults={
+        'misfire_grace_time': 60,   # bỏ qua nếu trễ quá 60s (vd: máy vừa wake)
+        'coalesce': True,           # gộp lại nếu fire nhiều lần cùng lúc
+    }
+)
+_aps.start()
+logger.info("[SCHED] APScheduler đã khởi động")
 
+# Theo dõi (instance, group_name) đang chạy để chặn chồng lượt lặp
+_running_group_keys: set = set()
+
+
+# ─────────────────────────────────────────────
+# API công khai
+# ─────────────────────────────────────────────
+
+def register_job(job, update_ui_callback=None, save_jobs_callback=None):
+    """Đăng ký 1 Job vào APScheduler."""
+    if job.scheduled_time is None:
+        job.update_scheduled_time()
+    if job.scheduled_time is None:
+        logger.warning(f"[SCHED] Không đăng ký được job (scheduled_time is None): {job}")
+        return
+
+    job_id = f"job_{id(job)}"
+    func   = _fire_group_job if job.is_group else _fire_single_job
+
+    _aps.add_job(
+        func=func,
+        trigger='date',
+        run_date=job.scheduled_time,
+        args=[job, update_ui_callback, save_jobs_callback],
+        id=job_id,
+        replace_existing=True,
+    )
+    logger.info(
+        f"[SCHED] Đã đăng ký job '{job_id}' "
+        f"lúc {job.scheduled_time.strftime('%d/%m %H:%M:%S')}: {job}"
+    )
+
+
+def unregister_job(job):
+    """Hủy job khỏi APScheduler."""
     try:
-        logger.info(f"[SCHED] Bắt đầu thread nhóm '{group_job.group_name}' trên {group_job.instance}")
+        _aps.remove_job(f"job_{id(job)}")
+        logger.info(f"[SCHED] Đã hủy job 'job_{id(job)}'")
+    except Exception:
+        pass
 
-        group = next((g for g in ACTION_GROUPS if g["name"] == group_job.group_name), None)
+
+def pause_scheduler():
+    _aps.pause()
+    logger.info("[SCHED] Tạm dừng APScheduler")
+
+
+def resume_scheduler():
+    _aps.resume()
+    logger.info("[SCHED] Tiếp tục APScheduler")
+
+
+def shutdown_scheduler():
+    _aps.shutdown(wait=False)
+    logger.info("[SCHED] Đã tắt APScheduler")
+
+
+# ─────────────────────────────────────────────
+# Internal: fire job đơn
+# ─────────────────────────────────────────────
+
+def _fire_single_job(job, update_ui_callback, save_jobs_callback):
+    logger.info(f"[SCHED] Fire single job: {job}")
+    try:
+        execute_single_job(job)
+        job.status = "Đã chạy" if job.status != "Lỗi" else "Lỗi"
+    except Exception as e:
+        logger.error(f"[SCHED] Lỗi fire single job: {e}\n{traceback.format_exc()}")
+        job.status = "Lỗi"
+    finally:
+        _after_job(job, update_ui_callback, save_jobs_callback)
+
+
+# ─────────────────────────────────────────────
+# Internal: fire job nhóm
+# ─────────────────────────────────────────────
+
+def _fire_group_job(job, update_ui_callback, save_jobs_callback):
+    """Được APScheduler gọi đúng giờ → spawn thread chạy nhóm."""
+    logger.info(f"[SCHED] Fire group job: {job}")
+
+    key = (job.instance, job.group_name)
+    if key in _running_group_keys:
+        logger.warning(
+            f"[SCHED] Nhóm '{job.group_name}' trên '{job.instance}' "
+            f"đang chạy (lượt trước chưa xong) → bỏ qua, vẫn lên lịch lặp tiếp."
+        )
+        job.status = "Bỏ qua - Trùng lượt"
+        _after_job(job, update_ui_callback, save_jobs_callback)
+        if getattr(job, 'is_repeating', False) and not getattr(job, 'should_stop', False):
+            _schedule_next_repeat(job, update_ui_callback, save_jobs_callback)
+        return
+
+    if job in running_threads:
+        logger.warning(f"[SCHED] Job nhóm đang chạy (running_threads), bỏ qua: {job}")
+        return
+
+    job.status = "Đang chạy"
+    t = threading.Thread(
+        target=_run_group_thread,
+        args=(job, update_ui_callback, save_jobs_callback),
+        daemon=False,
+        name=f"GroupThread-{job.group_name}-{job.instance}",
+    )
+    running_threads[job] = t
+    t.start()
+
+
+# ─────────────────────────────────────────────
+# Internal: thread chạy các action trong nhóm
+# ─────────────────────────────────────────────
+
+def _run_group_thread(job, update_ui_callback, save_jobs_callback):
+    key = (job.instance, job.group_name)
+    _running_group_keys.add(key)
+    try:
+        logger.info(f"[SCHED] Bắt đầu thread nhóm '{job.group_name}' trên {job.instance}")
+
+        group = next((g for g in ACTION_GROUPS if g["name"] == job.group_name), None)
         if not group:
-            group_job.status = "Lỗi - Nhóm không tồn tại"
-            logger.error(f"Nhóm '{group_job.group_name}' không tồn tại")
-            return False
+            job.status = "Lỗi - Nhóm không tồn tại"
+            logger.error(f"Nhóm '{job.group_name}' không tồn tại")
+            return
 
-        # === REBUILD group_jobs nếu cần (lặp lại) ===
-        if not group_job.group_jobs or group_job.current_child_index >= len(group_job.group_jobs):
-            logger.info(f"[SCHED] Rebuild group_jobs cho nhóm '{group_job.group_name}'")
-            group_job.group_jobs = []
-            group_job.current_child_index = 0
-            now = datetime.now()
-            current_time = group_job.scheduled_time or now
+        job.group_jobs = []
+        job.current_child_index = 0
 
-            for action in group["actions"]:
-                time_str = current_time.strftime("%H:%M:%S")
-                child = Job(
-                    time_str=time_str,
-                    instance=group_job.instance,
-                    job_type=action["type"],
-                    value=action.get("value"),
-                    group_name=group_job.group_name
-                )
-                child.scheduled_time = current_time
-                group_job.group_jobs.append(child)
-                current_time += timedelta(seconds=action.get("delay", 0))
-
-        # === CHẠY NHÓM MẶC ĐỊNH CHỈ 1 LẦN DUY NHẤT Ở ĐÂY ===
-        # Import từ utils để tránh circular import
-        from utils import run_default_group_if_exists
-        
-        # Lấy giá trị default_group_name tại thời điểm này (snapshot)
+        # ── Chạy nhóm mặc định TRƯỚC (blocking) ─────────────────────────
+        # Đo thời gian để biết nhóm mặc định tốn bao lâu, dùng tính mốc delay.
+        default_elapsed = 0.0
+        default_start = datetime.now()
         try:
             from gui import default_group_name
-            default_group_snapshot = default_group_name
-        except:
-            default_group_snapshot = None
+        except Exception:
+            default_group_name = None
 
-        if default_group_snapshot:
+        if default_group_name:
             try:
-                logger.info(f"[SCHED] Chạy nhóm mặc định '{default_group_snapshot}' trước nhóm chính")
-                run_default_group_if_exists(group_job.instance, default_group_snapshot)
-                logger.info(f"[SCHED] Hoàn thành nhóm mặc định")
-                time.sleep(1)  # Đợi một chút sau nhóm mặc định
+                from utils import run_default_group_if_exists
+                run_default_group_if_exists(job.instance, default_group_name)
             except Exception as e:
-                logger.warning(f"[SCHED] Không chạy được nhóm mặc định cho {group_job.instance}: {e}")
+                logger.warning(f"Không chạy được nhóm mặc định cho {job.instance}: {e}")
+            default_elapsed = (datetime.now() - default_start).total_seconds()
+            if default_elapsed > 1:
+                logger.info(
+                    f"[GROUP] Nhóm mặc định '{default_group_name}' tốn "
+                    f"{default_elapsed:.1f}s trên '{job.instance}'"
+                )
 
-        # === THỰC THI CÁC HÀNH ĐỘNG CON ===
-        action_success_count = 0
-        while group_job.current_child_index < len(group_job.group_jobs) and not getattr(group_job, 'should_stop', False):
-            child = group_job.group_jobs[group_job.current_child_index]
+        # ── Tính mốc thời gian cho các action con ────────────────────────
+        #
+        # Nguyên tắc:
+        #   - Nếu nhóm mặc định xong TRƯỚC giờ gốc → neo theo giờ gốc (lịch đều đặn).
+        #   - Nếu nhóm mặc định chạy LÂU, vượt qua giờ gốc → neo theo now(),
+        #     để delay giữa các action con vẫn được tôn trọng đầy đủ từ lúc này.
+        #
+        current_time = max(job.scheduled_time, datetime.now())
 
-            # Chờ đến giờ của child job
-            if child.scheduled_time:
-                diff = (child.scheduled_time - datetime.now()).total_seconds()
-                if diff > 0:
-                    logger.debug(f"[SCHED] Chờ {diff:.1f}s để thực thi hành động tiếp theo")
-                    sleep_sec = min(diff, 1.0)
-                    while sleep_sec > 0 and not getattr(group_job, 'should_stop', False):
-                        time.sleep(sleep_sec)
-                        sleep_sec = min((child.scheduled_time - datetime.now()).total_seconds(), 1.0)
+        for action in group["actions"]:
+            child = Job(
+                time_str=current_time.strftime("%H:%M:%S"),
+                instance=job.instance,
+                job_type=action["type"],
+                value=action.get("value"),
+                group_name=job.group_name,
+                scheduled_time=current_time,  # truyền thẳng → không gọi update_scheduled_time()
+            )
+            job.group_jobs.append(child)
+            current_time += timedelta(seconds=action.get("delay", 0))
 
-            if getattr(group_job, 'should_stop', False):
-                logger.info(f"[SCHED] Job nhóm đã được dừng ở hành động {group_job.current_child_index + 1}")
+        # ── Thực thi từng action con, đợi đúng giờ ───────────────────────
+        while job.current_child_index < len(job.group_jobs):
+            if getattr(job, 'should_stop', False):
                 break
 
-            logger.info(f"[SCHED] Thực thi hành động {group_job.current_child_index + 1}/{len(group_job.group_jobs)}: {child.job_type} - {child.value}")
+            child = job.group_jobs[job.current_child_index]
 
-            # Thực thi child job
-            try:
-                if child.job_type == "group":
-                    # Nhóm con lồng nhau
-                    sub_group = next((g for g in ACTION_GROUPS if g["name"] == child.value), None)
-                    if sub_group:
-                        success = run_group_actions(child.instance, sub_group["actions"], group_name=child.value)
-                        child.status = "Đã chạy" if success else "Lỗi"
-                    else:
-                        child.status = "Lỗi - Nhóm con không tồn tại"
-                        logger.error(f"[SCHED] Nhóm con '{child.value}' không tồn tại")
-                else:
-                    # Job đơn lẻ
-                    success = execute_single_job(child)
-                    if success:
-                        action_success_count += 1
-                        child.status = "Đã chạy"
-                    else:
-                        child.status = "Lỗi"
-            except Exception as e:
-                logger.error(f"[SCHED] Lỗi khi thực thi hành động {group_job.current_child_index + 1}: {e}")
-                child.status = "Lỗi"
+            # Chờ đến scheduled_time của action con
+            if child.scheduled_time:
+                while True:
+                    diff = (child.scheduled_time - datetime.now()).total_seconds()
+                    if diff <= 0 or getattr(job, 'should_stop', False):
+                        break
+                    _time.sleep(min(diff, 0.5))
 
-            group_job.current_child_index += 1
-            
-            # Update UI sau mỗi hành động
-            if update_ui_callback:
-                update_ui_callback()
+            if getattr(job, 'should_stop', False):
+                break
 
-        # Kết thúc nhóm
-        if getattr(group_job, 'should_stop', False):
-            group_job.status = "Đã dừng"
-            logger.warning(f"[SCHED] Nhóm '{group_job.group_name}' đã bị dừng bởi người dùng")
-        else:
-            group_job.status = "Đã chạy"
-            logger.info(f"[SCHED] Nhóm '{group_job.group_name}' hoàn thành thành công ({action_success_count} hành động)")
-
-        logger.info(f"[SCHED] Hoàn thành nhóm '{group_job.group_name}' trên {group_job.instance} → {group_job.status}")
-
-        # Xử lý lặp lại
-        if getattr(group_job, 'is_repeating', False) and not getattr(group_job, 'should_stop', False):
-            next_time = datetime.now() + timedelta(seconds=group_job.repeat_interval)
-            next_time_str = next_time.strftime("%H:%M:%S")
-
-            new_job = Job(
-                time_str=next_time_str,
-                instance=group_job.instance,
-                group_name=group_job.group_name,
-                is_group=True,
-                group_jobs=[],
-                status="Đã hẹn"
+            logger.info(
+                f"[GROUP] Thực thi {job.current_child_index + 1}/{len(job.group_jobs)}: "
+                f"{child.job_type} - {child.value}"
             )
-            new_job.is_repeating = True
-            new_job.repeat_interval = group_job.repeat_interval
-            new_job.update_scheduled_time()
 
-            jobs.append(new_job)
-            logger.info(f"[SCHED] Tạo job lặp mới lúc {next_time_str} (mỗi {group_job.repeat_interval}s)")
+            if child.job_type == "group":
+                sub_group = next((g for g in ACTION_GROUPS if g["name"] == child.value), None)
+                if sub_group:
+                    run_group_actions(child.instance, sub_group["actions"])
+                child.status = "Đã chạy"
+            else:
+                success = execute_single_job(child)
+                child.status = "Đã chạy" if success else "Lỗi"
 
-            save_jobs()
-            if update_ui_callback:
-                update_ui_callback()
+            job.current_child_index += 1
 
-        return True
+        # ── Cập nhật trạng thái cuối ──────────────────────────────────────
+        if getattr(job, 'should_stop', False):
+            job.status = "Đã dừng"
+        else:
+            job.status = "Đã chạy"
+
+        logger.info(f"[SCHED] Hoàn thành nhóm '{job.group_name}' trên {job.instance} → {job.status}")
+
+        # ── Lên lịch lặp tiếp theo ────────────────────────────────────────
+        if getattr(job, 'is_repeating', False) and not getattr(job, 'should_stop', False):
+            _schedule_next_repeat(job, update_ui_callback, save_jobs_callback)
 
     except Exception as e:
-        logger.error(f"[SCHED] Lỗi nghiêm trọng trong thread nhóm {group_job.group_name}: {e}\n{traceback.format_exc()}")
-        group_job.status = "Lỗi"
-        return False
+        logger.error(
+            f"[SCHED] Lỗi nghiêm trọng thread nhóm {job.group_name}: "
+            f"{e}\n{traceback.format_exc()}"
+        )
+        job.status = "Lỗi"
     finally:
-        if group_job in running_threads:
-            del running_threads[group_job]
+        _running_group_keys.discard(key)
+        running_threads.pop(job, None)
+        _after_job(job, update_ui_callback, save_jobs_callback)
 
-def scheduled_checker(jobs_list_ref, update_ui_callback, save_jobs_callback):
+
+# ─────────────────────────────────────────────
+# Internal: tính và đăng ký lượt lặp kế tiếp
+# ─────────────────────────────────────────────
+
+def _schedule_next_repeat(job, update_ui_callback, save_jobs_callback):
     """
-    Vòng lặp chính để kiểm tra và thực thi các job hẹn giờ.
-    Chạy trong thread daemon.
+    Tính giờ lặp kế tiếp từ ORIGIN GỐC tuyệt đối, không phải scheduled_time
+    của job hiện tại — tránh drift giây lẻ sau nhiều ngày lặp.
+
+    Origin gốc được lưu trong job.origin_time (set lần đầu khi tạo job lặp).
+    Nếu chưa có (job cũ, tương thích ngược) thì dùng job.scheduled_time làm origin.
+
+    Ví dụ: origin 11:00:00, interval 3600s
+      → lần 2: 12:00:00, lần 3: 13:00:00  (không bao giờ thành 12:00:01)
     """
-    logger.info("[SCHED] Scheduler checker đã khởi động")
+    now      = datetime.now()
+    interval = timedelta(seconds=job.repeat_interval)
 
-    while is_running:
-        try:
-            if is_paused:
-                logger.debug("[SCHED] Scheduler tạm dừng")
-                time.sleep(1)
-                continue
+    # origin_time: giờ gốc tuyệt đối, xuyên suốt chuỗi lặp
+    origin = getattr(job, 'origin_time', None) or job.scheduled_time
 
-            now = datetime.now()
+    # Bước nhảy tối thiểu để next_time > now
+    steps     = int((now - origin).total_seconds() / job.repeat_interval) + 1
+    next_time = origin + interval * steps
+    while next_time <= now:          # phòng rounding
+        steps    += 1
+        next_time = origin + interval * steps
 
-            for job in jobs_list_ref[:]:   # copy list để tránh lỗi modify trong lúc duyệt
-                if job.status != "Đã hẹn":
-                    continue
-                if job.scheduled_time is None:
-                    job.update_scheduled_time()
-                    continue
+    next_time_str = next_time.strftime("%H:%M:%S")
 
-                diff = (job.scheduled_time - now).total_seconds()
-                # Cửa sổ thực thi: ±10 giây (tránh miss job, tránh chạy 2 lần)
-                if diff > 10 or diff < -10:
-                    continue
+    new_job = Job(
+        time_str=next_time_str,
+        instance=job.instance,
+        group_name=job.group_name,
+        is_group=True,
+        group_jobs=[],
+        status="Đã hẹn",
+        scheduled_time=next_time,   # truyền thẳng → không gọi update_scheduled_time()
+    )
+    new_job.is_repeating    = True
+    new_job.repeat_interval = job.repeat_interval
+    new_job.origin_time     = origin   # truyền origin gốc tuyệt đối xuyên suốt chuỗi lặp
 
-                logger.info(f"[SCHED] Đến giờ job: {job} (diff = {diff:.1f}s)")
+    jobs.append(new_job)
+    register_job(new_job, update_ui_callback, save_jobs_callback)
 
-                if not job.is_group:
-                    # Job đơn lẻ - thực thi ngay
-                    success = execute_single_job(job)
-                    job.status = "Đã chạy" if success else "Lỗi"
-                    logger.info(f"[SCHED] Job đơn lẻ kết thúc: {job.job_type} - {job.status}")
-                else:
-                    # Job nhóm - chạy trong thread riêng
-                    if job not in running_threads:
-                        job.status = "Đang chạy"
-                        t = threading.Thread(
-                            target=run_group_in_thread,
-                            args=(job, update_ui_callback, save_jobs_callback),
-                            daemon=False   # Không daemon để thread quan trọng không bị kill đột ngột
-                        )
-                        running_threads[job] = t
-                        t.start()
-                        logger.info(f"[SCHED] Khởi tạo thread cho nhóm '{job.group_name}' trên {job.instance}")
+    logger.info(
+        f"[SCHED] Job lặp tiếp theo: {new_job.group_name} @ {next_time_str} "
+        f"(interval {job.repeat_interval}s, "
+        f"origin gốc {origin.strftime('%d/%m %H:%M:%S')})"
+    )
 
-                if update_ui_callback:
-                    update_ui_callback()
-                if save_jobs_callback:
-                    save_jobs_callback()
+    if save_jobs_callback:
+        save_jobs_callback()
+    if update_ui_callback:
+        update_ui_callback()
 
-            time.sleep(0.5)   # Check mỗi 0.5 giây (thay vì 0.8s) để không miss job
 
-        except Exception as e:
-            logger.error(f"[SCHED] Lỗi trong scheduled_checker: {e}\n{traceback.format_exc()}")
-            time.sleep(2)   # tránh loop crash liên tục
+# ─────────────────────────────────────────────
+# Internal: callback chung sau khi job xong
+# ─────────────────────────────────────────────
+
+def _after_job(job, update_ui_callback, save_jobs_callback):
+    if update_ui_callback:
+        update_ui_callback()
+    if save_jobs_callback:
+        save_jobs_callback()
+
+
+# ─────────────────────────────────────────────
+# Tương thích ngược
+# ─────────────────────────────────────────────
+
+def scheduled_checker(*args, **kwargs):
+    """Deprecated — giữ để tránh ImportError."""
+    logger.warning("[SCHED] scheduled_checker() đã deprecated. Dùng register_job().")
+
+
+run_group_in_thread = _run_group_thread   # alias cũ

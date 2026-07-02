@@ -8,8 +8,8 @@ from utils import auto_close_messagebox
 jobs = []  # Danh sách toàn cục các job
 
 class Job:
-    def __init__(self, time_str, instance, job_type=None, value=None, group_name=None, 
-                 is_group=False, group_jobs=None, status="Đã hẹn"):
+    def __init__(self, time_str, instance, job_type=None, value=None, group_name=None,
+                 is_group=False, group_jobs=None, status="Đã hẹn", scheduled_time=None):
         self.time_str = time_str
         self.instance = instance
         self.job_type = job_type
@@ -18,12 +18,20 @@ class Job:
         self.is_group = is_group
         self.group_jobs = group_jobs or []
         self.status = status
-        self.scheduled_time = None
         self.current_child_index = 0 if is_group else None
         self.should_stop = False
-        self.is_repeating = False  # THÊM
+        self.is_repeating = False
         self.repeat_interval = 0
-        self.update_scheduled_time()
+        self.origin_time = None  # Giờ gốc tuyệt đối, truyền xuyên suốt chuỗi lặp
+
+        if scheduled_time is not None:
+            # Caller đã tính sẵn scheduled_time (vd: child job trong nhóm,
+            # job lặp từ scheduler) → dùng luôn, không gọi update_scheduled_time()
+            # để tránh bị nhảy sang ngày mai khi giờ đó đã qua.
+            self.scheduled_time = scheduled_time
+        else:
+            self.scheduled_time = None
+            self.update_scheduled_time()
 
     def update_scheduled_time(self):
         """Cập nhật thời gian thực thi dự kiến từ time_str"""
@@ -54,8 +62,9 @@ class Job:
             'group_jobs': [job.to_dict() for job in self.group_jobs] if self.group_jobs else [],
             'status': self.status,
             'current_child_index': self.current_child_index,
-            'is_repeating': getattr(self, 'is_repeating', False),  # Bắt buộc phải có dòng này
-            'repeat_interval': getattr(self, 'repeat_interval', 0)  # Bắt buộc phải có dòng này
+            'is_repeating': getattr(self, 'is_repeating', False),
+            'repeat_interval': getattr(self, 'repeat_interval', 0),
+            'origin_time': self.origin_time.isoformat() if getattr(self, 'origin_time', None) else None,
         }
 
     @classmethod
@@ -71,8 +80,11 @@ class Job:
             status=data.get('status', 'Đã hẹn')
         )
         job.current_child_index = data.get('current_child_index', 0)
-        job.is_repeating = data.get('is_repeating', False)      # Bắt buộc phải có
-        job.repeat_interval = data.get('repeat_interval', 0)    # Bắt buộc phải có
+        job.is_repeating = data.get('is_repeating', False)
+        job.repeat_interval = data.get('repeat_interval', 0)
+        # Restore origin_time nếu có (tránh drift sau nhiều ngày lặp)
+        origin_raw = data.get('origin_time')
+        job.origin_time = datetime.fromisoformat(origin_raw) if origin_raw else None
         job.update_scheduled_time()
         return job
 
