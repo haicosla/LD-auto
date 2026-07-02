@@ -1,2 +1,0 @@
-# LD-auto
-LD auto
