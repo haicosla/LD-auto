@@ -131,6 +131,9 @@ def update_jobs_list():
         root.after(0, safe_update)
 
 
+LABEL_WRAP = 480  # độ rộng (px) trước khi chữ tự xuống dòng thay vì kéo giãn hàng
+
+
 def _job_icon(job):
     return ("📋" if job.is_group
             else "🎬" if job.job_type == "record"
@@ -171,13 +174,14 @@ def _render_job_section_flat(parent_frame, sorted_jobs, is_pending):
     for idx, job in enumerate(sorted_jobs):
         frame = ttk.Frame(parent_frame)
         frame.pack(fill="x", anchor="w", pady=1)
+        frame.columnconfigure(0, weight=1)
 
         icon = _job_icon(job)
-        label = ttk.Label(frame, text=f"{icon} {str(job)}")
-        label.pack(side="left")
+        label = ttk.Label(frame, text=f"{icon} {str(job)}", wraplength=LABEL_WRAP, justify="left")
+        label.grid(row=0, column=0, sticky="w")
 
         btn_frame = ttk.Frame(frame)
-        btn_frame.pack(side="right")
+        btn_frame.grid(row=0, column=1, sticky="e", padx=(8, 0))
         _make_job_buttons(btn_frame, idx, job, is_pending)
 
 
@@ -214,6 +218,7 @@ def _render_job_section_grouped(parent_frame, sorted_jobs, is_pending):
 
         header = ttk.Frame(group_container)
         header.pack(fill="x", anchor="w")
+        header.columnconfigure(0, weight=1)
 
         machines = sorted(set(j.instance for _, j in entries))
         times = sorted(set(
@@ -228,11 +233,12 @@ def _render_job_section_grouped(parent_frame, sorted_jobs, is_pending):
 
         summary = (f"📋 {group_name} — {len(entries)} lượt — "
                    f"Máy: {', '.join(machines)} — Giờ: {', '.join(times)}{repeat_suffix}")
-        ttk.Label(header, text=summary, font=("", 9, "bold")).pack(side="left", anchor="w")
+        ttk.Label(header, text=summary, font=("", 9, "bold"),
+                  wraplength=LABEL_WRAP, justify="left").grid(row=0, column=0, sticky="w")
 
-        # Khung nút bên phải header — căn lề phải giống các dòng job con
+        # Khung nút bên phải header — luôn sát ngay bên phải dòng tóm tắt
         header_btns = ttk.Frame(header)
-        header_btns.pack(side="right")
+        header_btns.grid(row=0, column=1, sticky="e", padx=(8, 0))
 
         detail_frame = ttk.Frame(group_container)
         detail_frame.pack(fill="x", anchor="w", padx=(18, 0))
@@ -258,24 +264,28 @@ def _render_job_section_grouped(parent_frame, sorted_jobs, is_pending):
         for idx, job in entries:
             row = ttk.Frame(detail_frame)
             row.pack(fill="x", anchor="w", pady=1)
+            row.columnconfigure(0, weight=1)
 
             time_disp = job.scheduled_time.strftime('%d/%m %H:%M:%S') if job.scheduled_time else job.time_str
             row_text = f"   • {job.instance}  —  {time_disp}  [{job.status}]"
-            ttk.Label(row, text=row_text).pack(side="left")
+            ttk.Label(row, text=row_text, wraplength=LABEL_WRAP - 18,
+                      justify="left").grid(row=0, column=0, sticky="w")
 
             btn_frame = ttk.Frame(row)
-            btn_frame.pack(side="right")
+            btn_frame.grid(row=0, column=1, sticky="e", padx=(8, 0))
             _make_job_buttons(btn_frame, idx, job, is_pending)
 
     for idx, job in standalone:
         frame = ttk.Frame(parent_frame)
         frame.pack(fill="x", anchor="w", pady=1)
+        frame.columnconfigure(0, weight=1)
 
         icon = _job_icon(job)
-        ttk.Label(frame, text=f"{icon} {str(job)}").pack(side="left")
+        ttk.Label(frame, text=f"{icon} {str(job)}", wraplength=LABEL_WRAP,
+                  justify="left").grid(row=0, column=0, sticky="w")
 
         btn_frame = ttk.Frame(frame)
-        btn_frame.pack(side="right")
+        btn_frame.grid(row=0, column=1, sticky="e", padx=(8, 0))
         _make_job_buttons(btn_frame, idx, job, is_pending)
 
 
@@ -1529,18 +1539,18 @@ def update_groups_listbox():
             groups_listbox.insert(tk.END, group["name"])
         update_group_combobox()
         
-def clear_all_completed_repeating():
-    """Xóa tất cả job lặp lại đã chạy xong"""
+def clear_all_completed():
+    """Xóa tất cả job đã chạy xong (không lặp lại lẫn lặp lại)"""
     global jobs
     try:
-        # Lấy các job lặp lại đã chạy xong
+        # Lấy mọi job không còn ở trạng thái "Đã hẹn" (tức đã chạy xong/đã hủy...)
         to_remove = [
-            j for j in jobs 
-            if getattr(j, 'is_repeating', False) and j.status != "Đã hẹn"
+            j for j in jobs
+            if j.status != "Đã hẹn"
         ]
 
         if not to_remove:
-            messagebox.showinfo("Thông báo", "Không có job lặp lại nào đã chạy xong để xóa.")
+            messagebox.showinfo("Thông báo", "Không có job nào đã chạy xong để xóa.")
             return
 
         removed_count = 0
@@ -1550,7 +1560,7 @@ def clear_all_completed_repeating():
                     unregister_job(job)
                     jobs.remove(job)
                     removed_count += 1
-                    logger.info(f"[CLEAR] Đã xóa job lặp lại: {job}")
+                    logger.info(f"[CLEAR] Đã xóa job: {job}")
                 except Exception as e:
                     logger.error(f"Lỗi khi xóa job: {e}")
 
@@ -1558,16 +1568,16 @@ def clear_all_completed_repeating():
         update_jobs_list()
         save_jobs()
 
-        logger.info(f"[CLEAR] Tổng cộng đã xóa {removed_count} job lặp lại đã chạy xong.")
+        logger.info(f"[CLEAR] Tổng cộng đã xóa {removed_count} job đã chạy xong.")
         messagebox.showinfo(
             "Thành công",
-            f"Đã xóa {removed_count} job lặp lại đã hoàn thành.\n"
+            f"Đã xóa {removed_count} job đã hoàn thành.\n"
             f"Đã lưu thay đổi vào scheduled_jobs.json."
         )
 
     except Exception as e:
-        logger.error(f"Lỗi trong clear_all_completed_repeating: {e}")
-        messagebox.showerror("Lỗi", f"Không thể xóa job lặp lại:\n{str(e)}")
+        logger.error(f"Lỗi trong clear_all_completed: {e}")
+        messagebox.showerror("Lỗi", f"Không thể xóa job đã chạy xong:\n{str(e)}")
 
 def create_gui():
     global var_dict, record_line_var, schedule_time_var, key_input_var, group_var, group_combo
@@ -1750,11 +1760,19 @@ def create_gui():
         lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
     )
 
-    canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
     canvas.configure(yscrollcommand=scrollbar.set)
 
     canvas.pack(side="left", fill="both", expand=True)
     scrollbar.pack(side="right", fill="y")
+
+    # Ép scrollable_frame luôn rộng bằng canvas, để các nút căn phải (sticky="e")
+    # dính sát mép phải cửa sổ và tự chạy theo khi kéo giãn/thu nhỏ cửa sổ.
+    _canvas_window_id = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+
+    def _on_canvas_configure(event, canvas=canvas, win_id=_canvas_window_id):
+        canvas.itemconfig(win_id, width=event.width)
+
+    canvas.bind("<Configure>", _on_canvas_configure)
 
     # Gán biến toàn cục để update_jobs_list() dùng
     global schedule_list_frame
@@ -1776,8 +1794,8 @@ def create_gui():
     pause_button = ttk.Button(button_frame, text="Tạm dừng", command=toggle_pause)
     pause_button.pack(side="left", expand=True, fill="x", padx=5)
     
-    ttk.Button(button_frame, text="Xoá tất cả lặp lại - đã chạy xong", 
-               command=clear_all_completed_repeating).pack(side="left", expand=True, fill="x", padx=(5, 0))
+    ttk.Button(button_frame, text="Xoá tất cả đã chạy xong",
+               command=clear_all_completed).pack(side="left", expand=True, fill="x", padx=(5, 0))
 
     # Bind chuột cuộn cho canvas
     def _on_mousewheel(event):
